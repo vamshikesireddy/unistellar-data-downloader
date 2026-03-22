@@ -22,6 +22,7 @@ import argparse
 import json
 import sys
 import threading
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,6 +36,22 @@ CONNECT_TIMEOUT = 15
 READ_TIMEOUT = 300        # 5 min per chunk read
 LIST_TIMEOUT = 120        # 2 min for observation list
 EVENT_POLL_TIMEOUT = 30   # event long-poll timeout
+
+ALLOWED_FORMATS = ("fits", "tiff", "png")
+
+
+def _safe_str(val: object, max_len: int = 50) -> str:
+    """Sanitize a value for terminal display — strip non-printable/non-ASCII chars."""
+    s = str(val) if val is not None else ""
+    s = "".join(c for c in s if c.isprintable() and ord(c) < 128)
+    return s[:max_len]
+
+
+def _safe_int(val: object, default: int = 0) -> int:
+    """Safely coerce a value to int."""
+    if isinstance(val, (int, float)):
+        return int(val)
+    return default
 
 
 class EventPoller:
@@ -94,24 +111,25 @@ class EventPoller:
                 if not self.running:
                     break
 
+                # Limit response size to prevent memory exhaustion
+                text = resp.text[:8192]
                 try:
-                    data = json.loads(resp.text)
+                    data = json.loads(text)
                 except (json.JSONDecodeError, ValueError):
-                    # Try to extract JSON from non-standard response
-                    text = resp.text.strip()
+                    text = text.strip()
                     if text.startswith("{"):
                         try:
                             data = json.loads(text)
-                        except Exception:
+                        except (json.JSONDecodeError, ValueError):
                             continue
                     else:
                         continue
 
                 cmd = data.get("cmd", "")
                 if cmd == "download":
-                    self.status = data.get("status", "")
-                    self.progress = data.get("progress", 0)
-                    self.nb_frames = data.get("nb_frames", 0)
+                    self.status = str(data.get("status", ""))
+                    self.progress = _safe_int(data.get("progress", 0))
+                    self.nb_frames = _safe_int(data.get("nb_frames", 0))
                 elif cmd == "obslist":
                     pass  # Observation list update, ignore
 
@@ -121,7 +139,7 @@ class EventPoller:
             except requests.exceptions.ConnectionError:
                 if self.running:
                     time.sleep(2)
-            except Exception:
+            except (json.JSONDecodeError, ValueError, KeyError, TypeError):
                 if self.running:
                     time.sleep(2)
 
@@ -194,7 +212,7 @@ def list_observations(session: requests.Session) -> list[dict]:
 
 def format_timestamp(ms: int) -> str:
     """Convert millisecond timestamp to readable date."""
-    if ms <= 0:
+    if not isinstance(ms, (int, float)) or ms <= 0:
         return "?"
     try:
         dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
@@ -210,11 +228,11 @@ def display_observations(observations: list[dict]) -> None:
     for i, obs in enumerate(observations, 1):
         obs_start = obs.get("obs_start", 0)
         date_str = format_timestamp(obs_start)
-        purpose = obs.get("purpose", "")
-        pmode = obs.get("pmode", "")
+        purpose = _safe_str(obs.get("purpose", ""))
+        pmode = _safe_str(obs.get("pmode", ""))
         obs_type = f"{pmode} {purpose}".strip() if purpose else pmode
-        frames = obs.get("nb_frames", 0)
-        tag = obs.get("obs_attr", {}).get("tag_sc", "")
+        frames = _safe_int(obs.get("nb_frames", 0))
+        tag = _safe_str(obs.get("obs_attr", {}).get("tag_sc", ""))
         print(f"{i:>3}  {date_str:<22}  {obs_type:<22}  {frames:>7}  {tag}")
 
 
@@ -278,17 +296,23 @@ def download_observation(
 ) -> bool:
     """Download a single observation with event polling + retry."""
     vpath = obs.get("vpath", "")
-    name = obs.get("name", "unknown")
-    purpose = obs.get("purpose", "")
-    frames = obs.get("nb_frames", 0)
-    tag = obs.get("obs_attr", {}).get("tag_sc", "")
+    name = _safe_str(obs.get("name", "unknown"))
+    purpose = _safe_str(obs.get("purpose", ""))
+    frames = _safe_int(obs.get("nb_frames", 0))
+    tag = _safe_str(obs.get("obs_attr", {}).get("tag_sc", ""))
 
-    # Build descriptive filename
+    # Build sanitized filename — only allow alphanumeric + safe chars
     parts = [p for p in [purpose.lower(), tag, name] if p]
     raw_name = "_".join(parts)
     safe_name = "".join(c if c.isalnum() or c in "-_." else "_" for c in raw_name)
-    safe_name = safe_name.strip("_") or vpath.replace("/", "_")
-    dest = output_dir / f"{safe_name}.zip"
+    fallback = "".join(c if c.isalnum() or c in "-_." else "_" for c in vpath.replace("/", "_"))
+    safe_name = safe_name.strip("_") or fallback.strip("_") or "observation"
+    dest = (output_dir / f"{safe_name}.zip").resolve()
+
+    # Guard against path traversal — dest must be inside output_dir
+    if not str(dest).startswith(str(output_dir.resolve())):
+        print(f"\n[{index}/{total}] ERROR: path traversal detected, skipping")
+        return False
 
     # Skip if already downloaded (verify it's a real zip, not a saved error page)
     if dest.exists() and dest.stat().st_size > 1024:
@@ -303,7 +327,14 @@ def download_observation(
                   f"({dest.stat().st_size} bytes, not a zip)")
             dest.unlink()
 
-    download_url = f"{API_BASE}/observations/zip/{fmt}/0x0/{vpath}"
+    # Validate format before URL construction
+    if fmt not in ALLOWED_FORMATS:
+        print(f"\n[{index}/{total}] ERROR: invalid format '{fmt}'")
+        return False
+
+    # URL-encode vpath to prevent path injection
+    vpath_encoded = urllib.parse.quote(vpath, safe="/")
+    download_url = f"{API_BASE}/observations/zip/{fmt}/0x0/{vpath_encoded}"
 
     print(f"\n[{index}/{total}] {purpose} {tag or name}")
     print(f"  {frames} frames")
@@ -482,7 +513,7 @@ def main():
     )
     args = parser.parse_args()
 
-    output_dir = Path(args.output).expanduser()
+    output_dir = Path(args.output).expanduser().resolve()
 
     if not check_connection():
         sys.exit(1)
@@ -503,7 +534,7 @@ def main():
                 json={"cmd": "cancelDownload"},
                 timeout=(5, 10),
             )
-            print(f"  Response: {resp.text[:200]}")
+            print(f"  Response: {_safe_str(resp.text, 200)}")
         except Exception as e:
             print(f"  {e}")
         sys.exit(0)
@@ -546,7 +577,9 @@ def main():
         if ok:
             succeeded += 1
         else:
-            failed.append(obs.get("obs_attr", {}).get("tag_sc", obs.get("name", "?")))
+            failed.append(_safe_str(
+                obs.get("obs_attr", {}).get("tag_sc", obs.get("name", "?"))
+            ))
 
     print("\n" + "=" * 50)
     print(f"DONE: {succeeded}/{len(selected)} downloaded")

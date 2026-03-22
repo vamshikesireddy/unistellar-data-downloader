@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unistellar-data-downloader"
-version = "1.0.0"
+version = "1.0.1"
 description = "Reliable data downloader for Unistellar telescopes (eVscope, eQuinox, Odyssey)"
 readme = "README.md"
 license = "MIT"
@@ -21,7 +21,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Astronomy",
 ]
 dependencies = [
-    "requests>=2.25.0",
+    "requests>=2.31.0",
 ]
 
 [project.scripts]
