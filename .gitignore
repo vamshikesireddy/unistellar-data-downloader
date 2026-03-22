@@ -1,0 +1,18 @@
+# Downloaded data
+unistellar_data/
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# Claude
+CLAUDE.md

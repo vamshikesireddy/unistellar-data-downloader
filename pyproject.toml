@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unistellar-downloader"
+version = "1.0.0"
+description = "Reliable data downloader for Unistellar telescopes (eVscope, eQuinox, Odyssey)"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [
+    { name = "Vamshi Kesireddy" },
+]
+keywords = ["unistellar", "telescope", "astronomy", "fits", "evscope", "equinox", "odyssey"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
+dependencies = [
+    "requests>=2.25.0",
+]
+
+[project.scripts]
+unistellar-download = "unistellar_downloader.cli:main"
+
+[project.urls]
+Repository = "https://github.com/vamshikesireddy/unistellar-downloader"
+Issues = "https://github.com/vamshikesireddy/unistellar-downloader/issues"
