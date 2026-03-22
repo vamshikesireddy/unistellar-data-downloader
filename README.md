@@ -16,13 +16,13 @@ This tool fixes that by:
 ## Install
 
 ```bash
-pip install unistellar-downloader
+pip install unistellar-data-downloader
 ```
 
 Or clone and run directly:
 ```bash
-git clone https://github.com/vamshikesireddy/unistellar-downloader.git
-cd unistellar-downloader
+git clone https://github.com/vamshikesireddy/unistellar-data-downloader.git
+cd unistellar-data-downloader
 pip install .
 ```
 

@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "unistellar-downloader"
+name = "unistellar-data-downloader"
 version = "1.0.0"
 description = "Reliable data downloader for Unistellar telescopes (eVscope, eQuinox, Odyssey)"
 readme = "README.md"
@@ -28,5 +28,5 @@ dependencies = [
 unistellar-download = "unistellar_downloader.cli:main"
 
 [project.urls]
-Repository = "https://github.com/vamshikesireddy/unistellar-downloader"
-Issues = "https://github.com/vamshikesireddy/unistellar-downloader/issues"
+Repository = "https://github.com/vamshikesireddy/unistellar-data-downloader"
+Issues = "https://github.com/vamshikesireddy/unistellar-data-downloader/issues"
