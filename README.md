@@ -1,5 +1,9 @@
 # Unistellar Telescope Data Downloader
 
+[![PyPI version](https://img.shields.io/pypi/v/unistellar-data-downloader)](https://pypi.org/project/unistellar-data-downloader/)
+[![Python 3.9+](https://img.shields.io/pypi/pyversions/unistellar-data-downloader)](https://pypi.org/project/unistellar-data-downloader/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 Reliable command-line tool to download FITS, TIFF, or PNG observation data from Unistellar telescopes (eVscope, eQuinox, Odyssey) over WiFi.
 
 ## Why?
