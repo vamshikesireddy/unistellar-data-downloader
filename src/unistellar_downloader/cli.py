@@ -23,10 +23,12 @@ import json
 import sys
 import threading
 import urllib.parse
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-BASE_URL = "http://192.168.100.1"
+DEFAULT_IP = "192.168.100.1"
+BASE_URL = f"http://{DEFAULT_IP}"
 API_BASE = f"{BASE_URL}/api"
 
 CHUNK_SIZE = 256 * 1024   # 256 KB chunks
@@ -66,6 +68,7 @@ class EventPoller:
         self.status = ""
         self.error = None
         self._session = None
+        self.ready = threading.Event()  # Set when backend acknowledges the poll
 
     def start(self):
         """Start polling in background thread."""
@@ -102,14 +105,23 @@ class EventPoller:
 
     def _poll_loop(self):
         """Continuously long-poll /api/event."""
+        first_poll = True
         while self.running:
             try:
+                # First poll uses short timeout to confirm connection quickly.
+                # Odyssey holds the connection for the full 30s long-poll,
+                # so we'd never signal readiness without this.
+                read_timeout = 5 if first_poll else EVENT_POLL_TIMEOUT
+                first_poll = False
                 resp = self._session.get(
                     f"{API_BASE}/event",
-                    timeout=(CONNECT_TIMEOUT, EVENT_POLL_TIMEOUT),
+                    timeout=(CONNECT_TIMEOUT, read_timeout),
                 )
                 if not self.running:
                     break
+
+                # Backend responded — it knows we're polling
+                self.ready.set()
 
                 # Limit response size to prevent memory exhaustion
                 text = resp.text[:8192]
@@ -134,12 +146,13 @@ class EventPoller:
                     pass  # Observation list update, ignore
 
             except requests.exceptions.ReadTimeout:
-                # Normal — long poll timed out, retry immediately
-                pass
+                # Timeout still means connection was established — backend saw us
+                self.ready.set()
             except requests.exceptions.ConnectionError:
                 if self.running:
                     time.sleep(2)
             except (json.JSONDecodeError, ValueError, KeyError, TypeError):
+                self.ready.set()  # Got a response, even if unparseable
                 if self.running:
                     time.sleep(2)
 
@@ -286,6 +299,26 @@ def select_format() -> str:
     return fmt
 
 
+def _validate_zip_has_data(path: Path) -> bool:
+    """Verify the zip contains actual frame data, not just manifest.
+
+    The Odyssey (and possibly other models) may return a valid zip with only
+    the manifest.json and no frame files if the event poller wasn't ready
+    in time. This detects that case.
+    """
+    try:
+        with zipfile.ZipFile(path) as z:
+            for name in z.namelist():
+                # Skip directory entries and manifest
+                if name.endswith("/") or name.endswith("manifest.json"):
+                    continue
+                # Any other file means real data
+                return True
+        return False
+    except (zipfile.BadZipFile, OSError):
+        return False
+
+
 def download_observation(
     session: requests.Session,
     obs: dict,
@@ -314,14 +347,18 @@ def download_observation(
         print(f"\n[{index}/{total}] ERROR: path traversal detected, skipping")
         return False
 
-    # Skip if already downloaded (verify it's a real zip, not a saved error page)
+    # Skip if already downloaded (verify it's a real zip with actual frame data)
     if dest.exists() and dest.stat().st_size > 1024:
         with open(dest, "rb") as f:
             magic = f.read(2)
-        if magic == b"PK":
+        if magic == b"PK" and _validate_zip_has_data(dest):
             print(f"\n[{index}/{total}] {purpose} {tag} — already exists "
                   f"({dest.stat().st_size / 1024 / 1024:.1f} MB), skipping")
             return True
+        elif magic == b"PK":
+            print(f"\n[{index}/{total}] {purpose} {tag} — removing incomplete zip "
+                  f"({dest.stat().st_size} bytes, manifest only)")
+            dest.unlink()
         else:
             print(f"\n[{index}/{total}] {purpose} {tag} — removing invalid file "
                   f"({dest.stat().st_size} bytes, not a zip)")
@@ -339,24 +376,36 @@ def download_observation(
     print(f"\n[{index}/{total}] {purpose} {tag or name}")
     print(f"  {frames} frames")
 
+    manifest_only_retries = 0  # Track consecutive manifest-only failures
+
     for attempt in range(1, MAX_RETRIES + 1):
-        # Cancel any stuck download from a previous run before starting
-        if attempt == 1:
-            try:
-                requests.post(
-                    f"{API_BASE}/event",
-                    json={"cmd": "cancelDownload"},
-                    timeout=(3, 5),
-                )
-                time.sleep(1)
-            except Exception:
-                pass
+        # Cancel any stuck/partial download before each attempt
+        try:
+            requests.post(
+                f"{API_BASE}/event",
+                json={"cmd": "cancelDownload"},
+                timeout=(3, 5),
+            )
+            time.sleep(1)
+        except Exception:
+            pass
 
         # Start event poller — REQUIRED for the backend to stream the zip
         poller = EventPoller()
         poller.start()
-        # Give poller a moment to establish connection
-        time.sleep(1)
+
+        # Wait for backend to acknowledge the poll before requesting zip.
+        # First poll uses 5s timeout, so ready should fire within ~6s.
+        ready_timeout = 10 + (manifest_only_retries * 5)
+        if not poller.ready.wait(timeout=ready_timeout):
+            print("  Warning: event poller not confirmed, proceeding anyway...")
+
+        # Let the second poll cycle begin before we request the zip.
+        # Odyssey needs the poller actively re-polling, not just connected once.
+        settle = 3 + min(manifest_only_retries * 3, 15)
+        if manifest_only_retries > 0:
+            print(f"  Poller ready, waiting {settle}s for backend to settle...")
+        time.sleep(settle)
 
         try:
             print(f"  Attempt {attempt}/{MAX_RETRIES}...", flush=True)
@@ -441,6 +490,22 @@ def download_observation(
                     continue
                 return False
 
+            # Validate the zip contains actual frame data (not just manifest)
+            if not _validate_zip_has_data(dest):
+                manifest_only_retries += 1
+                print(f"\n  WARNING: zip has no frame data ({final_size} bytes, manifest only)")
+                dest.unlink(missing_ok=True)
+                if manifest_only_retries >= 3:
+                    # Persistent manifest-only = firmware doesn't support this format
+                    print(f"\n  This telescope's firmware may not support {fmt.upper()} export.")
+                    print("  Try a different format: --format png  or  --format tiff")
+                    return False
+                print("  Retrying with longer warm-up...")
+                if attempt < MAX_RETRIES:
+                    time.sleep(RETRY_DELAY)
+                    continue
+                return False
+
             avg_speed = final_size / elapsed if elapsed > 0 else 0
             if avg_speed > 1024 * 1024:
                 avg_str = f"{avg_speed / 1024 / 1024:.1f} MB/s"
@@ -511,7 +576,17 @@ def main():
         "--cancel", action="store_true",
         help="Cancel any in-progress download on the telescope",
     )
+    parser.add_argument(
+        "--ip", default=None,
+        help=f"Telescope IP address (default: {DEFAULT_IP})",
+    )
     args = parser.parse_args()
+
+    # Allow custom telescope IP (e.g., Odyssey on home network via DHCP)
+    if args.ip:
+        global BASE_URL, API_BASE
+        BASE_URL = f"http://{args.ip}"
+        API_BASE = f"{BASE_URL}/api"
 
     output_dir = Path(args.output).expanduser().resolve()
 
